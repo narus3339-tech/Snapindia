@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function isValidString(field, maxLen) {
+      return field is string && field.size() <= maxLen;
+    }
+
+    // ─── USERS ───────────────────────────────────────────────────────────────
+    // Anyone logged in can read any user profile
+    // Only the owner can update their own profile
+    match /users/{uid} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isOwner(uid);
+      allow update: if isAuthenticated() && isOwner(uid)
+        && isValidString(request.resource.data.displayName, 50)
+        && isValidString(request.resource.data.bio, 150);
+      allow delete: if false; // accounts cannot be self-deleted via client
+    }
+
+    // ─── POSTS ───────────────────────────────────────────────────────────────
+    // Any logged-in user can read posts and create new ones
+    // Only the author can update or delete their own post
+    match /posts/{postId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.resource.data.authorUid == request.auth.uid
+        && isValidString(request.resource.data.caption, 2200)
+        && request.resource.data.mediaUrl is string;
+      allow update: if isAuthenticated()
+        && (
+          // Author edits caption / location
+          (isOwner(resource.data.authorUid)
+            && isValidString(request.resource.data.caption, 2200))
+          ||
+          // Any authenticated user can increment/decrement likesCount
+          // and commentsCount (controlled via subcollections below)
+          (request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['likesCount', 'commentsCount']))
+        );
+      allow delete: if isAuthenticated() && isOwner(resource.data.authorUid);
+
+      // ─── LIKES (subcollection) ──────────────────────────────────────────
+      // Users can only add/remove their own like document
+      match /likes/{likeUid} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && isOwner(likeUid);
+        allow delete: if isAuthenticated() && isOwner(likeUid);
+        allow update: if false;
+      }
+
+      // ─── COMMENTS (subcollection) ───────────────────────────────────────
+      // Any user can read/create. Only the comment author can delete.
+      match /comments/{commentId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated()
+          && request.resource.data.authorUid == request.auth.uid
+          && isValidString(request.resource.data.text, 500);
+        allow delete: if isAuthenticated()
+          && isOwner(resource.data.authorUid);
+        allow update: if false;
+      }
+    }
+
+    // ─── FOLLOWS ─────────────────────────────────────────────────────────────
+    // Any logged-in user can read follows (to check if following)
+    // Users can only create/delete their own follow records
+    match /follows/{followId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.resource.data.followerId == request.auth.uid;
+      allow delete: if isAuthenticated()
+        && resource.data.followerId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ─── STORIES ─────────────────────────────────────────────────────────────
+    // Any logged-in user can read non-expired stories
+    // Only the author can create/delete their own story
+    match /stories/{storyId} {
+      allow read: if isAuthenticated()
+        && resource.data.expiresAt > request.time;
+      allow create: if isAuthenticated()
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.expiresAt is timestamp;
+      allow update: if isAuthenticated()
+        // Only allow adding viewer uid to viewedBy array
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedBy']);
+      allow delete: if isAuthenticated()
+        && isOwner(resource.data.authorUid);
+    }
+
+    // ─── NOTIFICATIONS ────────────────────────────────────────────────────────
+    // Only the recipient can read their own notifications
+    // Any authenticated user can create a notification (for likes/comments/follows)
+    // Only the recipient can update (mark as read) or delete
+    match /notifications/{notifId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.toUid);
+      allow create: if isAuthenticated()
+        && request.resource.data.fromUid == request.auth.uid;
+      allow update: if isAuthenticated()
+        && isOwner(resource.data.toUid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if isAuthenticated() && isOwner(resource.data.toUid);
+    }
+
+  }
+}
